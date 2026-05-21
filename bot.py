@@ -5,7 +5,6 @@ import requests
 import random
 from html.parser import HTMLParser
 from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 from aiohttp import web
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -139,58 +138,66 @@ def save_data(data: dict):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ── Telegram handlers ─────────────────────────────────────────────────────────
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Xin chào! Tôi là bot tra lịch cắt điện NPC.\n\n"
-        "📌 *Các lệnh:*\n"
-        "• /them `<mã_KH>` — Thêm mã khách hàng\n"
-        "• /xoa `<mã_KH>` — Xoá mã khách hàng\n"
-        "• /xem — Xem danh sách đang theo dõi\n"
-        "• /tra `<mã_KH>` — Tra cứu ngay\n\n"
-        "🕗 Bot tự động gửi lịch mỗi sáng 8h.",
-        parse_mode="Markdown")
+# ── Xử lý lệnh Telegram ───────────────────────────────────────────────────────
+async def handle_update(bot: Bot, update: Update):
+    msg = update.message
+    if not msg or not msg.text: return
 
-async def cmd_them(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /them <mã\\_KH>", parse_mode="Markdown"); return
-    ma = ctx.args[0].strip().upper()
-    chat_id = str(update.effective_chat.id)
-    data = load_data(); data.setdefault(chat_id, [])
-    if ma not in data[chat_id]:
-        data[chat_id].append(ma); save_data(data)
-        await update.message.reply_text(f"✅ Đã thêm: `{ma}`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"⚠️ `{ma}` đã có rồi.", parse_mode="Markdown")
+    text    = msg.text.strip()
+    chat_id = str(msg.chat.id)
+    parts   = text.split()
+    cmd     = parts[0].lower().split("@")[0]
 
-async def cmd_xoa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /xoa <mã\\_KH>", parse_mode="Markdown"); return
-    ma = ctx.args[0].strip().upper()
-    chat_id = str(update.effective_chat.id)
-    data = load_data()
-    if ma in data.get(chat_id, []):
-        data[chat_id].remove(ma); save_data(data)
-        await update.message.reply_text(f"🗑️ Đã xoá: `{ma}`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"❌ Không tìm thấy `{ma}`.", parse_mode="Markdown")
+    if cmd == "/start":
+        await bot.send_message(chat_id=msg.chat.id,
+            text=(
+                "👋 Xin chào! Tôi là bot tra lịch cắt điện NPC.\n\n"
+                "📌 *Các lệnh:*\n"
+                "• /them `<mã_KH>` — Thêm mã khách hàng\n"
+                "• /xoa `<mã_KH>` — Xoá mã khách hàng\n"
+                "• /xem — Xem danh sách đang theo dõi\n"
+                "• /tra `<mã_KH>` — Tra cứu ngay\n\n"
+                "🕗 Bot tự động gửi lịch mỗi sáng 8h."
+            ), parse_mode="Markdown")
 
-async def cmd_xem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    ma_list = load_data().get(chat_id, [])
-    text = ("📋 *Danh sách mã KH:*\n" + "\n".join(f"• `{m}`" for m in ma_list)
-            if ma_list else "Chưa có mã. Dùng /them để thêm.")
-    await update.message.reply_text(text, parse_mode="Markdown")
+    elif cmd == "/them":
+        if len(parts) < 2:
+            await bot.send_message(chat_id=msg.chat.id, text="❓ Dùng: /them <mã\\_KH>", parse_mode="Markdown"); return
+        ma   = parts[1].strip().upper()
+        data = load_data(); data.setdefault(chat_id, [])
+        if ma not in data[chat_id]:
+            data[chat_id].append(ma); save_data(data)
+            await bot.send_message(chat_id=msg.chat.id, text=f"✅ Đã thêm: `{ma}`", parse_mode="Markdown")
+        else:
+            await bot.send_message(chat_id=msg.chat.id, text=f"⚠️ `{ma}` đã có rồi.", parse_mode="Markdown")
 
-async def cmd_tra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /tra <mã\\_KH>", parse_mode="Markdown"); return
-    ma = ctx.args[0].strip().upper()
-    await update.message.reply_text(f"🔍 Đang tra `{ma}`...", parse_mode="Markdown")
-    result = await asyncio.get_event_loop().run_in_executor(None, fetch_lich_cat_dien, ma)
-    await update.message.reply_text(result, parse_mode="Markdown")
+    elif cmd == "/xoa":
+        if len(parts) < 2:
+            await bot.send_message(chat_id=msg.chat.id, text="❓ Dùng: /xoa <mã\\_KH>", parse_mode="Markdown"); return
+        ma   = parts[1].strip().upper()
+        data = load_data()
+        if ma in data.get(chat_id, []):
+            data[chat_id].remove(ma); save_data(data)
+            await bot.send_message(chat_id=msg.chat.id, text=f"🗑️ Đã xoá: `{ma}`", parse_mode="Markdown")
+        else:
+            await bot.send_message(chat_id=msg.chat.id, text=f"❌ Không tìm thấy `{ma}`.", parse_mode="Markdown")
 
-# ── Daily send (GitHub Actions) ───────────────────────────────────────────────
+    elif cmd == "/xem":
+        ma_list = load_data().get(chat_id, [])
+        text_out = ("📋 *Danh sách mã KH:*\n" + "\n".join(f"• `{m}`" for m in ma_list)
+                    if ma_list else "Chưa có mã. Dùng /them để thêm.")
+        await bot.send_message(chat_id=msg.chat.id, text=text_out, parse_mode="Markdown")
+
+    elif cmd == "/tra":
+        if len(parts) < 2:
+            await bot.send_message(chat_id=msg.chat.id, text="❓ Dùng: /tra <mã\\_KH>", parse_mode="Markdown"); return
+        ma = parts[1].strip().upper()
+        await bot.send_message(chat_id=msg.chat.id, text=f"🔍 Đang tra `{ma}`...", parse_mode="Markdown")
+        loop   = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, fetch_lich_cat_dien, ma)
+        await bot.send_message(chat_id=msg.chat.id, text=result, parse_mode="Markdown")
+
+# ── Daily send ────────────────────────────────────────────────────────────────
 async def daily_send():
     bot = Bot(token=BOT_TOKEN)
     data = load_data()
@@ -204,29 +211,21 @@ async def daily_send():
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 async def main():
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))  # Render dùng 10000 mặc định
+    bot  = Bot(token=BOT_TOKEN)
 
-    # Build telegram app
-    tg_app = Application.builder().token(BOT_TOKEN).build()
-    tg_app.add_handler(CommandHandler("start", cmd_start))
-    tg_app.add_handler(CommandHandler("them",  cmd_them))
-    tg_app.add_handler(CommandHandler("xoa",   cmd_xoa))
-    tg_app.add_handler(CommandHandler("xem",   cmd_xem))
-    tg_app.add_handler(CommandHandler("tra",   cmd_tra))
-    await tg_app.initialize()
-    await tg_app.start()
-
-    # aiohttp handlers
     async def handle_webhook(request):
-        data = await request.json()
-        update = Update.de_json(data, tg_app.bot)
-        await tg_app.process_update(update)
+        try:
+            data   = await request.json()
+            update = Update.de_json(data, bot)
+            asyncio.create_task(handle_update(bot, update))
+        except Exception as e:
+            print(f"[webhook] Lỗi xử lý update: {e}")
         return web.Response(text="OK")
 
     async def handle_health(request):
         return web.Response(text="OK")
 
-    # Khởi động web server TRƯỚC
     web_app = web.Application()
     web_app.router.add_get("/",  handle_health)
     web_app.router.add_head("/", handle_health)
@@ -234,13 +233,15 @@ async def main():
 
     runner = web.AppRunner(web_app)
     await runner.setup()
+
+    # ✅ FIX: Start server TRƯỚC, đảm bảo port bind xong
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"[server] Đang lắng nghe trên cổng {port}")
+    print(f"[server] Lắng nghe trên cổng {port}")
 
-    # Đăng ký webhook SAU khi server đã chạy
+    # ✅ FIX: Chỉ đăng ký webhook SAU khi server đã lắng nghe
     webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-    await tg_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    await bot.set_webhook(url=webhook_url, drop_pending_updates=True)
     print(f"[webhook] Đã đăng ký: {webhook_url}")
     print("🤖 Bot đang chạy...")
 
