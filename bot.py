@@ -3,19 +3,17 @@ import json
 import asyncio
 import requests
 import random
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from html.parser import HTMLParser
-from urllib.parse import parse_qs
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from aiohttp import web
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BOT_TOKEN    = os.environ["BOT_TOKEN"]
-OWNER_ID     = int(os.environ["OWNER_CHAT_ID"])
-RENDER_URL   = os.environ.get("RENDER_URL", "")   # VD: https://dien-telegram-bot.onrender.com
-DATA_FILE    = "customers.json"
-NPC_URL      = "https://cskh.npc.com.vn/DichVuTTCSKH/DichVuTTCSKHNPC"
+BOT_TOKEN  = os.environ["BOT_TOKEN"]
+OWNER_ID   = int(os.environ["OWNER_CHAT_ID"])
+RENDER_URL = os.environ.get("RENDER_URL", "")
+DATA_FILE  = "customers.json"
+NPC_URL    = "https://cskh.npc.com.vn/DichVuTTCSKH/DichVuTTCSKHNPC"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -23,51 +21,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
-
-# ── Webhook HTTP Server ───────────────────────────────────────────────────────
-# Nhận update từ Telegram qua POST /webhook/<token>
-# Trả 200 OK cho GET / (UptimeRobot ping)
-
-_app_ref = None  # giữ reference tới Application
-
-class WebhookHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-
-    def do_POST(self):
-        path = self.path.rstrip("/")
-        expected = f"/webhook/{BOT_TOKEN}"
-        if path != expected:
-            self.send_response(404)
-            self.end_headers()
-            return
-
-        length = int(self.headers.get("Content-Length", 0))
-        body   = self.rfile.read(length)
-
-        # Xử lý update bất đồng bộ
-        import json as _json
-        update_data = _json.loads(body)
-        if _app_ref is not None:
-            loop = asyncio.new_event_loop()
-            update = Update.de_json(update_data, _app_ref.bot)
-            loop.run_until_complete(_app_ref.process_update(update))
-            loop.close()
-
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, *args):
-        pass
 
 # ── Proxy helpers ─────────────────────────────────────────────────────────────
 def fetch_proxies() -> list:
@@ -80,24 +33,21 @@ def fetch_proxies() -> list:
         for p in r.json():
             proxies.append(f"http://{p['ip']}:{p['port']}")
     except Exception as e:
-        print(f"[proxy] Không lấy được proxy list: {e}")
+        print(f"[proxy] Lỗi: {e}")
     return proxies
 
 def get_working_proxy(proxies: list) -> dict | None:
     random.shuffle(proxies)
     for proxy in proxies[:15]:
         try:
-            r = requests.get(
-                "https://httpbin.org/ip",
-                proxies={"http": proxy, "https": proxy},
-                timeout=5,
-            )
+            r = requests.get("https://httpbin.org/ip",
+                             proxies={"http": proxy, "https": proxy}, timeout=5)
             if r.status_code == 200:
-                print(f"[proxy] Dùng proxy: {proxy}")
+                print(f"[proxy] Dùng: {proxy}")
                 return {"http": proxy, "https": proxy}
         except Exception:
             continue
-    print("[proxy] Không tìm được proxy hoạt động.")
+    print("[proxy] Không tìm được proxy.")
     return None
 
 # ── HTML Parser ───────────────────────────────────────────────────────────────
@@ -105,26 +55,22 @@ class TableParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.in_table = False
-        self.rows     = []
-        self.cur_row  = []
-        self.cur_cell = []
+        self.rows, self.cur_row, self.cur_cell = [], [], []
 
     def handle_starttag(self, tag, attrs):
-        attrs_dict = dict(attrs)
+        d = dict(attrs)
         if tag == "table":
-            tid  = attrs_dict.get("id", "").lower()
-            tcls = attrs_dict.get("class", "").lower()
+            tid  = d.get("id", "").lower()
+            tcls = d.get("class", "").lower()
             if any(k in tid + tcls for k in ("lich", "schedule", "grid", "tb")):
                 self.in_table = True
         if self.in_table:
-            if tag == "tr":
-                self.cur_row = []
-            if tag in ("td", "th"):
-                self.cur_cell = []
+            if tag == "tr":   self.cur_row  = []
+            if tag in ("td","th"): self.cur_cell = []
 
     def handle_endtag(self, tag):
         if self.in_table:
-            if tag in ("td", "th"):
+            if tag in ("td","th"):
                 self.cur_row.append(" ".join(self.cur_cell).strip())
             if tag == "tr" and self.cur_row:
                 self.rows.append(self.cur_row[:])
@@ -135,80 +81,58 @@ class TableParser(HTMLParser):
     def handle_data(self, data):
         if self.in_table:
             d = data.strip()
-            if d:
-                self.cur_cell.append(d)
+            if d: self.cur_cell.append(d)
 
 def parse_html(html: str, ma_kh: str) -> str:
-    parser = TableParser()
-    parser.feed(html)
-
-    if parser.rows:
-        header    = parser.rows[0]
-        data_rows = parser.rows[1:]
+    p = TableParser()
+    p.feed(html)
+    if p.rows:
+        header, data_rows = p.rows[0], p.rows[1:]
         if not data_rows:
-            return f"✅ Mã KH *{ma_kh}*: Không có lịch cắt điện trong thời gian tới."
+            return f"✅ Mã KH *{ma_kh}*: Không có lịch cắt điện."
         lines = [f"⚡ *Lịch cắt điện – Mã KH: {ma_kh}*\n"]
         for row in data_rows:
             pairs = []
             for i, cell in enumerate(row):
-                col_name = header[i] if i < len(header) else f"Cột {i+1}"
-                if cell:
-                    pairs.append(f"{col_name}: {cell}")
-            if pairs:
-                lines.append("• " + " | ".join(pairs))
+                col = header[i] if i < len(header) else f"Cột {i+1}"
+                if cell: pairs.append(f"{col}: {cell}")
+            if pairs: lines.append("• " + " | ".join(pairs))
         return "\n".join(lines) if len(lines) > 1 else f"✅ Mã KH *{ma_kh}*: Không có lịch cắt điện."
-
     lower = html.lower()
-    if "không có lịch" in lower or "khong co lich" in lower:
-        return f"✅ Mã KH *{ma_kh}*: Không có lịch cắt điện trong thời gian tới."
-    if "không tìm thấy" in lower or "khong tim thay" in lower:
-        return f"❌ Mã KH *{ma_kh}* không tìm thấy trên hệ thống NPC."
-
-    return (
-        f"⚠️ Mã KH *{ma_kh}*: Không đọc được bảng lịch.\n"
-        "Trang NPC có thể thay đổi cấu trúc. Kiểm tra thủ công:\n"
-        "https://cskh.npc.com.vn/DichVuTTCSKH/DichVuTTCSKHNPC?index=7"
-    )
+    if "không có lịch" in lower: return f"✅ Mã KH *{ma_kh}*: Không có lịch cắt điện."
+    if "không tìm thấy" in lower: return f"❌ Mã KH *{ma_kh}* không tìm thấy."
+    return (f"⚠️ Mã KH *{ma_kh}*: Không đọc được bảng lịch.\n"
+            "Kiểm tra thủ công: https://cskh.npc.com.vn/DichVuTTCSKH/DichVuTTCSKHNPC?index=7")
 
 # ── NPC Scraper ───────────────────────────────────────────────────────────────
 def fetch_lich_cat_dien(ma_kh: str) -> str:
     headers = {
-        "User-Agent"      : random.choice(USER_AGENTS),
-        "Accept"          : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" : "vi-VN,vi;q=0.9,en-US;q=0.8",
-        "Referer"         : "https://cskh.npc.com.vn/",
-        "Connection"      : "keep-alive",
+        "User-Agent"     : random.choice(USER_AGENTS),
+        "Accept"         : "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+        "Referer"        : "https://cskh.npc.com.vn/",
     }
     params = {"index": "7", "MaKhachHang": ma_kh}
-
-    # Lần 1: thử thẳng
     try:
         print(f"[npc] Thử direct cho {ma_kh}...")
         resp = requests.get(NPC_URL, params=params, headers=headers, timeout=15)
-        resp.raise_for_status()
-        resp.encoding = "utf-8"
-        print("[npc] Direct thành công.")
+        resp.raise_for_status(); resp.encoding = "utf-8"
+        print("[npc] Direct OK.")
         return parse_html(resp.text, ma_kh)
     except Exception as e1:
-        print(f"[npc] Direct lỗi: {e1} → thử proxy VN...")
-
-    # Lần 2: thử proxy VN
-    proxies_list = fetch_proxies()
-    proxy = get_working_proxy(proxies_list)
+        print(f"[npc] Direct lỗi: {e1} → thử proxy...")
+    proxy = get_working_proxy(fetch_proxies())
     try:
         resp = requests.get(NPC_URL, params=params, headers=headers, proxies=proxy, timeout=25)
-        resp.raise_for_status()
-        resp.encoding = "utf-8"
-        print(f"[npc] Proxy thành công.")
+        resp.raise_for_status(); resp.encoding = "utf-8"
         return parse_html(resp.text, ma_kh)
     except Exception as e2:
-        return f"❌ Không thể kết nối trang NPC (direct + proxy đều lỗi):\n`{e2}`"
+        return f"❌ Không kết nối được NPC (direct + proxy lỗi):\n`{e2}`"
 
-# ── Lưu / đọc dữ liệu ────────────────────────────────────────────────────────
+# ── Data helpers ──────────────────────────────────────────────────────────────
 def load_data() -> dict:
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(DATA_FILE, "r", encoding="utf-8") as f: return json.load(f)
     return {}
 
 def save_data(data: dict):
@@ -222,67 +146,55 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "📌 *Các lệnh:*\n"
         "• /them `<mã_KH>` — Thêm mã khách hàng\n"
         "• /xoa `<mã_KH>` — Xoá mã khách hàng\n"
-        "• /xem — Xem danh sách mã đang theo dõi\n"
-        "• /tra `<mã_KH>` — Tra cứu ngay lập tức\n\n"
-        "🕗 Bot sẽ tự động gửi lịch mỗi sáng 8h.",
-        parse_mode="Markdown",
-    )
+        "• /xem — Xem danh sách đang theo dõi\n"
+        "• /tra `<mã_KH>` — Tra cứu ngay\n\n"
+        "🕗 Bot tự động gửi lịch mỗi sáng 8h.",
+        parse_mode="Markdown")
 
 async def cmd_them(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /them <mã\\_KH>\nVí dụ: /them PH03900533450", parse_mode="Markdown")
-        return
-    ma      = ctx.args[0].strip().upper()
+        await update.message.reply_text("❓ Dùng: /them <mã\\_KH>", parse_mode="Markdown"); return
+    ma = ctx.args[0].strip().upper()
     chat_id = str(update.effective_chat.id)
-    data    = load_data()
-    data.setdefault(chat_id, [])
+    data = load_data(); data.setdefault(chat_id, [])
     if ma not in data[chat_id]:
-        data[chat_id].append(ma)
-        save_data(data)
-        await update.message.reply_text(f"✅ Đã thêm mã KH: `{ma}`", parse_mode="Markdown")
+        data[chat_id].append(ma); save_data(data)
+        await update.message.reply_text(f"✅ Đã thêm: `{ma}`", parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"⚠️ Mã `{ma}` đã có trong danh sách.", parse_mode="Markdown")
+        await update.message.reply_text(f"⚠️ `{ma}` đã có rồi.", parse_mode="Markdown")
 
 async def cmd_xoa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /xoa <mã\\_KH>\nVí dụ: /xoa PH03900533450", parse_mode="Markdown")
-        return
-    ma      = ctx.args[0].strip().upper()
+        await update.message.reply_text("❓ Dùng: /xoa <mã\\_KH>", parse_mode="Markdown"); return
+    ma = ctx.args[0].strip().upper()
     chat_id = str(update.effective_chat.id)
-    data    = load_data()
+    data = load_data()
     if ma in data.get(chat_id, []):
-        data[chat_id].remove(ma)
-        save_data(data)
-        await update.message.reply_text(f"🗑️ Đã xoá mã KH: `{ma}`", parse_mode="Markdown")
+        data[chat_id].remove(ma); save_data(data)
+        await update.message.reply_text(f"🗑️ Đã xoá: `{ma}`", parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"❌ Không tìm thấy mã `{ma}` trong danh sách.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Không tìm thấy `{ma}`.", parse_mode="Markdown")
 
 async def cmd_xem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-    data    = load_data()
-    ma_list = data.get(chat_id, [])
-    if ma_list:
-        text = "📋 *Danh sách mã KH đang theo dõi:*\n" + "\n".join(f"• `{m}`" for m in ma_list)
-    else:
-        text = "Chưa có mã KH nào. Dùng /them để thêm."
+    ma_list = load_data().get(chat_id, [])
+    text = ("📋 *Danh sách mã KH:*\n" + "\n".join(f"• `{m}`" for m in ma_list)
+            if ma_list else "Chưa có mã. Dùng /them để thêm.")
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_tra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /tra <mã\\_KH>\nVí dụ: /tra PH03900533450", parse_mode="Markdown")
-        return
+        await update.message.reply_text("❓ Dùng: /tra <mã\\_KH>", parse_mode="Markdown"); return
     ma = ctx.args[0].strip().upper()
-    await update.message.reply_text(f"🔍 Đang tra cứu mã `{ma}`, vui lòng chờ...", parse_mode="Markdown")
-    result = fetch_lich_cat_dien(ma)
+    await update.message.reply_text(f"🔍 Đang tra `{ma}`...", parse_mode="Markdown")
+    result = await asyncio.get_event_loop().run_in_executor(None, fetch_lich_cat_dien, ma)
     await update.message.reply_text(result, parse_mode="Markdown")
 
-# ── Gửi hàng ngày (GitHub Actions) ───────────────────────────────────────────
+# ── Daily send (GitHub Actions) ───────────────────────────────────────────────
 async def daily_send():
-    bot  = Bot(token=BOT_TOKEN)
+    bot = Bot(token=BOT_TOKEN)
     data = load_data()
-    if not data:
-        print("Không có mã KH nào.")
-        return
+    if not data: print("Không có mã KH."); return
     for chat_id, ma_list in data.items():
         for ma in ma_list:
             print(f"[daily] {ma} → {chat_id}")
@@ -290,37 +202,56 @@ async def daily_send():
             await bot.send_message(chat_id=int(chat_id), text=result, parse_mode="Markdown")
     print("✅ Xong.")
 
+# ── Main (webhook với aiohttp) ────────────────────────────────────────────────
+async def main():
+    # Build application
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("them",  cmd_them))
+    app.add_handler(CommandHandler("xoa",   cmd_xoa))
+    app.add_handler(CommandHandler("xem",   cmd_xem))
+    app.add_handler(CommandHandler("tra",   cmd_tra))
+
+    await app.initialize()
+    await app.start()
+
+    # Đăng ký webhook
+    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+    await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    print(f"[webhook] Đã đăng ký: {webhook_url}")
+
+    # aiohttp web server — cùng event loop với bot
+    async def handle_webhook(request):
+        data = await request.json()
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
+        return web.Response(text="OK")
+
+    async def handle_health(request):
+        return web.Response(text="OK")
+
+    web_app = web.Application()
+    web_app.router.add_post(f"/webhook/{BOT_TOKEN}", handle_webhook)
+    web_app.router.add_get("/", handle_health)
+    web_app.router.add_head("/", handle_health)
+
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🤖 Bot đang chạy (webhook) trên cổng {port}...")
+
+    # Chạy mãi
+    await asyncio.Event().wait()
+
+    await app.stop()
+    await app.shutdown()
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
-
     if len(sys.argv) > 1 and sys.argv[1] == "daily":
         asyncio.run(daily_send())
     else:
-        # Build app
-        app = Application.builder().token(BOT_TOKEN).build()
-        app.add_handler(CommandHandler("start", cmd_start))
-        app.add_handler(CommandHandler("them",  cmd_them))
-        app.add_handler(CommandHandler("xoa",   cmd_xoa))
-        app.add_handler(CommandHandler("xem",   cmd_xem))
-        app.add_handler(CommandHandler("tra",   cmd_tra))
-
-        _app_ref = app
-
-        # Đăng ký webhook với Telegram
-        webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-        async def setup_webhook():
-            await app.initialize()
-            await app.bot.set_webhook(
-                url=webhook_url,
-                drop_pending_updates=True,
-            )
-            print(f"[webhook] Đã đăng ký: {webhook_url}")
-
-        asyncio.run(setup_webhook())
-
-        # Khởi động HTTP server nhận update từ Telegram
-        port = int(os.environ.get("PORT", 8080))
-        server = HTTPServer(("0.0.0.0", port), WebhookHandler)
-        print(f"🤖 Bot đang chạy (webhook) trên cổng {port}...")
-        server.serve_forever()
+        asyncio.run(main())
