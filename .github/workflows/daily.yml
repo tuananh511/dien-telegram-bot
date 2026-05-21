@@ -1,1 +1,36 @@
+name: Daily Cat Dien Notification
 
+on:
+  schedule:
+    - cron: '0 1 * * *'   # 8:00 sáng giờ VN (UTC+7 = 01:00 UTC)
+  workflow_dispatch:        # cho phép chạy tay để test
+
+jobs:
+  send-notification:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send daily notification
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
+        run: python bot.py daily
+
+      # Lưu lại customers.json sau khi bot lệnh cập nhật
+      - name: Commit customers.json if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add customers.json || true
+          git diff --cached --quiet || git commit -m "chore: update customers.json"
+          git push || true
