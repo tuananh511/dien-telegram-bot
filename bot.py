@@ -305,7 +305,6 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("xem",   cmd_xem))
         app.add_handler(CommandHandler("tra",   cmd_tra))
 
-        global _app_ref
         _app_ref = app
 
         # Đăng ký webhook với Telegram
