@@ -22,7 +22,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 
-# ── Health Server (giữ Render free tier không sleep) ─────────────────────────
+# ── Health Server ─────────────────────────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -66,7 +66,7 @@ def fetch_proxies() -> list:
 def get_working_proxy(proxies: list) -> dict | None:
     """Thử từng proxy, trả về proxy đầu tiên hoạt động."""
     random.shuffle(proxies)
-    for proxy in proxies[:15]:  # thử tối đa 15 cái
+    for proxy in proxies[:15]:
         try:
             r = requests.get(
                 "https://httpbin.org/ip",
@@ -78,25 +78,23 @@ def get_working_proxy(proxies: list) -> dict | None:
                 return {"http": proxy, "https": proxy}
         except Exception:
             continue
-    print("[proxy] Không tìm được proxy hoạt động, dùng IP thật.")
+    print("[proxy] Không tìm được proxy hoạt động.")
     return None
 
-# ── NPC Scraper ───────────────────────────────────────────────────────────────
+# ── HTML Parser ───────────────────────────────────────────────────────────────
 class TableParser(HTMLParser):
-    """Parse bảng lịch cắt điện từ HTML trả về của NPC."""
     def __init__(self):
         super().__init__()
-        self.in_table   = False
-        self.rows       = []
-        self.cur_row    = []
-        self.cur_cell   = []
+        self.in_table = False
+        self.rows     = []
+        self.cur_row  = []
+        self.cur_cell = []
 
     def handle_starttag(self, tag, attrs):
         attrs_dict = dict(attrs)
-        # Tìm table chứa lịch cắt điện (id hoặc class có chứa "lich" hoặc "schedule")
         if tag == "table":
-            tid   = attrs_dict.get("id", "").lower()
-            tcls  = attrs_dict.get("class", "").lower()
+            tid  = attrs_dict.get("id", "").lower()
+            tcls = attrs_dict.get("class", "").lower()
             if any(k in tid + tcls for k in ("lich", "schedule", "grid", "tb")):
                 self.in_table = True
         if self.in_table:
@@ -121,45 +119,15 @@ class TableParser(HTMLParser):
             if d:
                 self.cur_cell.append(d)
 
-
-def fetch_lich_cat_dien(ma_kh: str) -> str:
-    proxies_list = fetch_proxies()
-    proxy        = get_working_proxy(proxies_list)
-
-    headers = {
-        "User-Agent"      : random.choice(USER_AGENTS),
-        "Accept"          : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language" : "vi-VN,vi;q=0.9,en-US;q=0.8",
-        "Referer"         : "https://cskh.npc.com.vn/",
-        "Connection"      : "keep-alive",
-    }
-    params = {"index": "7", "MaKhachHang": ma_kh}
-
-    try:
-        resp = requests.get(
-            NPC_URL,
-            params=params,
-            headers=headers,
-            proxies=proxy,
-            timeout=20,
-        )
-        resp.raise_for_status()
-        resp.encoding = "utf-8"
-    except Exception as e:
-        return f"❌ Không thể kết nối trang NPC: {e}"
-
-    html = resp.text
-
-    # ── Thử parse bảng ────────────────────────────────────────────────────────
+def parse_html(html: str, ma_kh: str) -> str:
     parser = TableParser()
     parser.feed(html)
 
     if parser.rows:
-        header = parser.rows[0]
+        header    = parser.rows[0]
         data_rows = parser.rows[1:]
         if not data_rows:
             return f"✅ Mã KH *{ma_kh}*: Không có lịch cắt điện trong thời gian tới."
-
         lines = [f"⚡ *Lịch cắt điện – Mã KH: {ma_kh}*\n"]
         for row in data_rows:
             pairs = []
@@ -171,7 +139,6 @@ def fetch_lich_cat_dien(ma_kh: str) -> str:
                 lines.append("• " + " | ".join(pairs))
         return "\n".join(lines) if len(lines) > 1 else f"✅ Mã KH *{ma_kh}*: Không có lịch cắt điện."
 
-    # ── Fallback: tìm từ khoá trong text ────────────────────────────────────
     lower = html.lower()
     if "không có lịch" in lower or "khong co lich" in lower:
         return f"✅ Mã KH *{ma_kh}*: Không có lịch cắt điện trong thời gian tới."
@@ -180,9 +147,43 @@ def fetch_lich_cat_dien(ma_kh: str) -> str:
 
     return (
         f"⚠️ Mã KH *{ma_kh}*: Không đọc được bảng lịch.\n"
-        "Trang NPC có thể thay đổi cấu trúc. Vui lòng kiểm tra thủ công:\n"
+        "Trang NPC có thể thay đổi cấu trúc. Kiểm tra thủ công:\n"
         "https://cskh.npc.com.vn/DichVuTTCSKH/DichVuTTCSKHNPC?index=7"
     )
+
+# ── NPC Scraper: thử direct trước, fallback sang proxy VN ────────────────────
+def fetch_lich_cat_dien(ma_kh: str) -> str:
+    headers = {
+        "User-Agent"      : random.choice(USER_AGENTS),
+        "Accept"          : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" : "vi-VN,vi;q=0.9,en-US;q=0.8",
+        "Referer"         : "https://cskh.npc.com.vn/",
+        "Connection"      : "keep-alive",
+    }
+    params = {"index": "7", "MaKhachHang": ma_kh}
+
+    # Lần 1: thử thẳng không proxy
+    try:
+        print(f"[npc] Thử direct cho {ma_kh}...")
+        resp = requests.get(NPC_URL, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        resp.encoding = "utf-8"
+        print("[npc] Direct thành công.")
+        return parse_html(resp.text, ma_kh)
+    except Exception as e1:
+        print(f"[npc] Direct lỗi: {e1} → thử proxy VN...")
+
+    # Lần 2: thử với proxy VN
+    proxies_list = fetch_proxies()
+    proxy = get_working_proxy(proxies_list)
+    try:
+        resp = requests.get(NPC_URL, params=params, headers=headers, proxies=proxy, timeout=25)
+        resp.raise_for_status()
+        resp.encoding = "utf-8"
+        print(f"[npc] Proxy thành công: {proxy}")
+        return parse_html(resp.text, ma_kh)
+    except Exception as e2:
+        return f"❌ Không thể kết nối trang NPC (direct + proxy đều lỗi):\n`{e2}`"
 
 # ── Lưu / đọc dữ liệu ────────────────────────────────────────────────────────
 def load_data() -> dict:
@@ -195,7 +196,7 @@ def save_data(data: dict):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ── Telegram command handlers ─────────────────────────────────────────────────
+# ── Telegram handlers ─────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Xin chào! Tôi là bot tra lịch cắt điện NPC.\n\n"
@@ -210,7 +211,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_them(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /them <mã_KH>\nVí dụ: /them PC01234567")
+        await update.message.reply_text("❓ Dùng: /them <mã\\_KH>\nVí dụ: /them PH03900533450", parse_mode="Markdown")
         return
     ma      = ctx.args[0].strip().upper()
     chat_id = str(update.effective_chat.id)
@@ -225,7 +226,7 @@ async def cmd_them(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_xoa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /xoa <mã_KH>\nVí dụ: /xoa PC01234567")
+        await update.message.reply_text("❓ Dùng: /xoa <mã\\_KH>\nVí dụ: /xoa PH03900533450", parse_mode="Markdown")
         return
     ma      = ctx.args[0].strip().upper()
     chat_id = str(update.effective_chat.id)
@@ -238,9 +239,9 @@ async def cmd_xoa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Không tìm thấy mã `{ma}` trong danh sách.", parse_mode="Markdown")
 
 async def cmd_xem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id  = str(update.effective_chat.id)
-    data     = load_data()
-    ma_list  = data.get(chat_id, [])
+    chat_id = str(update.effective_chat.id)
+    data    = load_data()
+    ma_list = data.get(chat_id, [])
     if ma_list:
         text = "📋 *Danh sách mã KH đang theo dõi:*\n" + "\n".join(f"• `{m}`" for m in ma_list)
     else:
@@ -249,14 +250,14 @@ async def cmd_xem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_tra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("❓ Dùng: /tra <mã_KH>\nVí dụ: /tra PC01234567")
+        await update.message.reply_text("❓ Dùng: /tra <mã\\_KH>\nVí dụ: /tra PH03900533450", parse_mode="Markdown")
         return
     ma = ctx.args[0].strip().upper()
     await update.message.reply_text(f"🔍 Đang tra cứu mã `{ma}`, vui lòng chờ...", parse_mode="Markdown")
     result = fetch_lich_cat_dien(ma)
     await update.message.reply_text(result, parse_mode="Markdown")
 
-# ── Gửi hàng ngày (gọi từ GitHub Actions: python bot.py daily) ───────────────
+# ── Gửi hàng ngày (GitHub Actions: python bot.py daily) ──────────────────────
 async def daily_send():
     bot  = Bot(token=BOT_TOKEN)
     data = load_data()
@@ -267,11 +268,7 @@ async def daily_send():
         for ma in ma_list:
             print(f"[daily] Tra cứu {ma} → chat {chat_id}")
             result = fetch_lich_cat_dien(ma)
-            await bot.send_message(
-                chat_id=int(chat_id),
-                text=result,
-                parse_mode="Markdown",
-            )
+            await bot.send_message(chat_id=int(chat_id), text=result, parse_mode="Markdown")
     print("✅ Đã gửi xong tất cả thông báo.")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -279,10 +276,8 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) > 1 and sys.argv[1] == "daily":
-        # Chế độ gửi 1 lần — dùng cho GitHub Actions cronjob
         asyncio.run(daily_send())
     else:
-        # Chế độ bot lắng nghe lệnh — chạy trên Render
         Thread(target=run_health_server, daemon=True).start()
         print(f"[health] Server chạy trên cổng {os.environ.get('PORT', 8080)}")
 
