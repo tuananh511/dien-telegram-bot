@@ -6,14 +6,16 @@ import random
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from html.parser import HTMLParser
+from urllib.parse import parse_qs
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BOT_TOKEN  = os.environ["BOT_TOKEN"]
-OWNER_ID   = int(os.environ["OWNER_CHAT_ID"])
-DATA_FILE  = "customers.json"
-NPC_URL    = "https://cskh.npc.com.vn/DichVuTTCSKH/DichVuTTCSKHNPC"
+BOT_TOKEN    = os.environ["BOT_TOKEN"]
+OWNER_ID     = int(os.environ["OWNER_CHAT_ID"])
+RENDER_URL   = os.environ.get("RENDER_URL", "")   # VD: https://dien-telegram-bot.onrender.com
+DATA_FILE    = "customers.json"
+NPC_URL      = "https://cskh.npc.com.vn/DichVuTTCSKH/DichVuTTCSKHNPC"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -22,8 +24,13 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 
-# ── Health Server ─────────────────────────────────────────────────────────────
-class HealthHandler(BaseHTTPRequestHandler):
+# ── Webhook HTTP Server ───────────────────────────────────────────────────────
+# Nhận update từ Telegram qua POST /webhook/<token>
+# Trả 200 OK cho GET / (UptimeRobot ping)
+
+_app_ref = None  # giữ reference tới Application
+
+class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -36,21 +43,34 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        path = self.path.rstrip("/")
+        expected = f"/webhook/{BOT_TOKEN}"
+        if path != expected:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body   = self.rfile.read(length)
+
+        # Xử lý update bất đồng bộ
+        import json as _json
+        update_data = _json.loads(body)
+        if _app_ref is not None:
+            loop = asyncio.new_event_loop()
+            update = Update.de_json(update_data, _app_ref.bot)
+            loop.run_until_complete(_app_ref.process_update(update))
+            loop.close()
+
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"OK")
 
     def log_message(self, *args):
         pass
 
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
-
 # ── Proxy helpers ─────────────────────────────────────────────────────────────
 def fetch_proxies() -> list:
-    """Cào danh sách proxy VN miễn phí từ proxifly."""
     proxies = []
     try:
         r = requests.get(
@@ -64,7 +84,6 @@ def fetch_proxies() -> list:
     return proxies
 
 def get_working_proxy(proxies: list) -> dict | None:
-    """Thử từng proxy, trả về proxy đầu tiên hoạt động."""
     random.shuffle(proxies)
     for proxy in proxies[:15]:
         try:
@@ -151,7 +170,7 @@ def parse_html(html: str, ma_kh: str) -> str:
         "https://cskh.npc.com.vn/DichVuTTCSKH/DichVuTTCSKHNPC?index=7"
     )
 
-# ── NPC Scraper: thử direct trước, fallback sang proxy VN ────────────────────
+# ── NPC Scraper ───────────────────────────────────────────────────────────────
 def fetch_lich_cat_dien(ma_kh: str) -> str:
     headers = {
         "User-Agent"      : random.choice(USER_AGENTS),
@@ -162,7 +181,7 @@ def fetch_lich_cat_dien(ma_kh: str) -> str:
     }
     params = {"index": "7", "MaKhachHang": ma_kh}
 
-    # Lần 1: thử thẳng không proxy
+    # Lần 1: thử thẳng
     try:
         print(f"[npc] Thử direct cho {ma_kh}...")
         resp = requests.get(NPC_URL, params=params, headers=headers, timeout=15)
@@ -173,14 +192,14 @@ def fetch_lich_cat_dien(ma_kh: str) -> str:
     except Exception as e1:
         print(f"[npc] Direct lỗi: {e1} → thử proxy VN...")
 
-    # Lần 2: thử với proxy VN
+    # Lần 2: thử proxy VN
     proxies_list = fetch_proxies()
     proxy = get_working_proxy(proxies_list)
     try:
         resp = requests.get(NPC_URL, params=params, headers=headers, proxies=proxy, timeout=25)
         resp.raise_for_status()
         resp.encoding = "utf-8"
-        print(f"[npc] Proxy thành công: {proxy}")
+        print(f"[npc] Proxy thành công.")
         return parse_html(resp.text, ma_kh)
     except Exception as e2:
         return f"❌ Không thể kết nối trang NPC (direct + proxy đều lỗi):\n`{e2}`"
@@ -257,19 +276,19 @@ async def cmd_tra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     result = fetch_lich_cat_dien(ma)
     await update.message.reply_text(result, parse_mode="Markdown")
 
-# ── Gửi hàng ngày (GitHub Actions: python bot.py daily) ──────────────────────
+# ── Gửi hàng ngày (GitHub Actions) ───────────────────────────────────────────
 async def daily_send():
     bot  = Bot(token=BOT_TOKEN)
     data = load_data()
     if not data:
-        print("Không có mã KH nào trong danh sách.")
+        print("Không có mã KH nào.")
         return
     for chat_id, ma_list in data.items():
         for ma in ma_list:
-            print(f"[daily] Tra cứu {ma} → chat {chat_id}")
+            print(f"[daily] {ma} → {chat_id}")
             result = fetch_lich_cat_dien(ma)
             await bot.send_message(chat_id=int(chat_id), text=result, parse_mode="Markdown")
-    print("✅ Đã gửi xong tất cả thông báo.")
+    print("✅ Xong.")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -278,9 +297,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "daily":
         asyncio.run(daily_send())
     else:
-        Thread(target=run_health_server, daemon=True).start()
-        print(f"[health] Server chạy trên cổng {os.environ.get('PORT', 8080)}")
-
+        # Build app
         app = Application.builder().token(BOT_TOKEN).build()
         app.add_handler(CommandHandler("start", cmd_start))
         app.add_handler(CommandHandler("them",  cmd_them))
@@ -288,5 +305,23 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("xem",   cmd_xem))
         app.add_handler(CommandHandler("tra",   cmd_tra))
 
-        print("🤖 Bot đang chạy, chờ lệnh từ Telegram...")
-        app.run_polling(drop_pending_updates=True)
+        global _app_ref
+        _app_ref = app
+
+        # Đăng ký webhook với Telegram
+        webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+        async def setup_webhook():
+            await app.initialize()
+            await app.bot.set_webhook(
+                url=webhook_url,
+                drop_pending_updates=True,
+            )
+            print(f"[webhook] Đã đăng ký: {webhook_url}")
+
+        asyncio.run(setup_webhook())
+
+        # Khởi động HTTP server nhận update từ Telegram
+        port = int(os.environ.get("PORT", 8080))
+        server = HTTPServer(("0.0.0.0", port), WebhookHandler)
+        print(f"🤖 Bot đang chạy (webhook) trên cổng {port}...")
+        server.serve_forever()
