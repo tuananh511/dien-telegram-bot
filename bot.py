@@ -65,7 +65,7 @@ class TableParser(HTMLParser):
             if any(k in tid + tcls for k in ("lich", "schedule", "grid", "tb")):
                 self.in_table = True
         if self.in_table:
-            if tag == "tr":   self.cur_row  = []
+            if tag == "tr":        self.cur_row  = []
             if tag in ("td","th"): self.cur_cell = []
 
     def handle_endtag(self, tag):
@@ -127,7 +127,7 @@ def fetch_lich_cat_dien(ma_kh: str) -> str:
         resp.raise_for_status(); resp.encoding = "utf-8"
         return parse_html(resp.text, ma_kh)
     except Exception as e2:
-        return f"❌ Không kết nối được NPC (direct + proxy lỗi):\n`{e2}`"
+        return f"❌ Không kết nối được NPC:\n`{e2}`"
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
 def load_data() -> dict:
@@ -202,51 +202,50 @@ async def daily_send():
             await bot.send_message(chat_id=int(chat_id), text=result, parse_mode="Markdown")
     print("✅ Xong.")
 
-# ── Main (webhook với aiohttp) ────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 async def main():
-    # Build application
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("them",  cmd_them))
-    app.add_handler(CommandHandler("xoa",   cmd_xoa))
-    app.add_handler(CommandHandler("xem",   cmd_xem))
-    app.add_handler(CommandHandler("tra",   cmd_tra))
+    port = int(os.environ.get("PORT", 8080))
 
-    await app.initialize()
-    await app.start()
+    # Build telegram app
+    tg_app = Application.builder().token(BOT_TOKEN).build()
+    tg_app.add_handler(CommandHandler("start", cmd_start))
+    tg_app.add_handler(CommandHandler("them",  cmd_them))
+    tg_app.add_handler(CommandHandler("xoa",   cmd_xoa))
+    tg_app.add_handler(CommandHandler("xem",   cmd_xem))
+    tg_app.add_handler(CommandHandler("tra",   cmd_tra))
+    await tg_app.initialize()
+    await tg_app.start()
 
-    # Đăng ký webhook
-    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-    await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    print(f"[webhook] Đã đăng ký: {webhook_url}")
-
-    # aiohttp web server — cùng event loop với bot
+    # aiohttp handlers
     async def handle_webhook(request):
         data = await request.json()
-        update = Update.de_json(data, app.bot)
-        await app.process_update(update)
+        update = Update.de_json(data, tg_app.bot)
+        await tg_app.process_update(update)
         return web.Response(text="OK")
 
     async def handle_health(request):
         return web.Response(text="OK")
 
+    # Khởi động web server TRƯỚC
     web_app = web.Application()
-    web_app.router.add_post(f"/webhook/{BOT_TOKEN}", handle_webhook)
-    web_app.router.add_get("/", handle_health)
+    web_app.router.add_get("/",  handle_health)
     web_app.router.add_head("/", handle_health)
+    web_app.router.add_post(f"/webhook/{BOT_TOKEN}", handle_webhook)
 
-    port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"🤖 Bot đang chạy (webhook) trên cổng {port}...")
+    print(f"[server] Đang lắng nghe trên cổng {port}")
 
-    # Chạy mãi
+    # Đăng ký webhook SAU khi server đã chạy
+    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+    await tg_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    print(f"[webhook] Đã đăng ký: {webhook_url}")
+    print("🤖 Bot đang chạy...")
+
+    # Giữ chạy mãi
     await asyncio.Event().wait()
-
-    await app.stop()
-    await app.shutdown()
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
