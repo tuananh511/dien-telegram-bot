@@ -5,6 +5,8 @@ import requests
 import random
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ── Config ──────────────────────────────────────────────
 BOT_TOKEN   = os.environ["BOT_TOKEN"]
@@ -187,6 +189,17 @@ async def daily_send():
             result = fetch_lich_cat_dien(ma)
             await bot.send_message(chat_id=int(chat_id), text=result, parse_mode="Markdown")
     print("✅ Đã gửi xong lịch cắt điện.")
+    -----------------------------------------------
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *args): pass  # tắt log spam
+
+def run_health():
+    HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), HealthHandler).serve_forever()
 
 # ── Entry point ───────────────────────────────────────────
 if __name__ == "__main__":
