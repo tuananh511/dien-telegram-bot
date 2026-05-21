@@ -228,7 +228,6 @@ async def main():
 
     web_app = web.Application()
     web_app.router.add_get("/",  handle_health)
-    web_app.router.add_head("/", handle_health)
     web_app.router.add_post(f"/webhook/{BOT_TOKEN}", handle_webhook)
 
     runner = web.AppRunner(web_app)
